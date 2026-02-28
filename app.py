@@ -4,18 +4,18 @@ from typing import Optional, Tuple, Union
 from flask import Flask, render_template, request, redirect, url_for, session, jsonify, Response
 from flask.typing import ResponseReturnValue
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, auth
 from firebase_admin.firestore import DocumentReference
+from dotenv import load_dotenv
 import os
+import requests
+
+load_dotenv()
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.getenv("FLASK_SECRET_KEY", "dev-secret-key")
 
-# A dummy user for the login. 
-dummy_user = {
-    "username": "student",
-    "password": "secret"
-}
+WEB_API_KEY = os.environ.get("FIREBASE_WEB_API_KEY")
 
 # Initialize Firestore
 if not firebase_admin._apps:
@@ -30,17 +30,28 @@ def get_current_user():
     Uses session data set during `/login`. This keeps all login checks
     consistent in one place.
     """
-    if not session.get("logged_in"):
+    token = session.get("idToken")
+    if not token:
         return None
-    return session.get("username")
+    decoded = auth.verify_id_token(token)
+    session["uid"] = decoded.get("uid")
+    session["email"] = decoded.get("email")
+    return decoded.get("email")
 
 
 def get_user_or_401():
     """Return the current API user or an Unauthorized response."""
-    current_user = get_current_user()
-    if not current_user:
-        return jsonify({"error": "Unauthorized"}), 401
-    return current_user
+    header = request.headers.get("Authorization")
+    if not header or not header.startswith("Bearer "):
+        return jsonify({"error": "Invalid token format"}), 401
+    token = header.split(" ")[1]
+    if not token:
+        return None
+    try:
+        decoded = auth.verify_id_token(token)
+        return decoded["uid"]
+    except Exception as e:
+        return jsonify({"error": f"Unauthorized: {str(e)}"}), 401
 
 
 def get_profile_doc_ref(username: str):
@@ -98,21 +109,115 @@ def home():
     return redirect(url_for("login"))
 
 
+@app.route("/signup", methods=["GET", "POST"])
+def signup():
+    if request.method == "GET":
+        return render_template("signup.html")
+
+    email = request.form.get("email")
+    password = request.form.get("password")
+    confirm_password = request.form.get("confirm_password")
+
+    # Validate passwords match
+    if password != confirm_password:
+        return render_template("signup.html", error="Passwords do not match"), 400
+
+    # Create user with Firebase Admin SDK
+    try:
+        user = auth.create_user(email=email, password=password)
+    except auth.EmailAlreadyExistsError:
+        return render_template("signup.html", error="An account with that email already exists"), 409
+    except ValueError:
+        return render_template("signup.html", error="Invalid email or password"), 400
+    except Exception:
+        return render_template("signup.html", error="Could not create account, please try again"), 500
+    
+    # Initialize profile in Firestore
+    try:
+        profile_ref = db.collection("users").document(user.uid)
+        profile_ref.set({"email": email,
+                        "role": "user",
+                        "created_at": firestore.SERVER_TIMESTAMP})
+    except Exception:
+        try:
+            auth.delete_user(user.uid)
+        except Exception:
+            pass
+        return render_template("signup.html", error="Could not create account, please try again"), 500
+    
+    # Redirect to login on success
+    return redirect(url_for("login")), 201
+
+
+@app.route("/api/signup", methods=["POST"])
+def signup_json():
+    email = request.form.get("email")
+    password = request.form.get("password")
+    confirm_password = request.form.get("confirm_password")
+
+    # Validate passwords match
+    if password != confirm_password:
+        return jsonify({"error": "Passwords do not match"}), 400
+
+    # Create user with Firebase Admin SDK
+    try:
+        user = auth.create_user(email=email, password=password)
+    except auth.EmailAlreadyExistsError:
+        return jsonify({"error": "An account with that email already exists"}), 409
+    except ValueError:
+        return jsonify({"error": "Invalid email or password"}), 400
+    except Exception:
+        return jsonify({"error": "Could not create account, please try again"}), 500
+    
+    # Initialize profile in Firestore
+    try:
+        profile_ref = db.collection("users").document(user.uid)
+        profile_ref.set({"email": email,
+                        "role": "user",
+                        "created_at": firestore.SERVER_TIMESTAMP})
+    except Exception:
+        try:
+            auth.delete_user(user.uid)
+        except Exception:
+            pass
+        return jsonify({"error": "Could not create profile, please try again"}), 500
+    
+    # Redirect to login on success
+    return jsonify({"uid": user.uid, "email": email, "role": "user"}), 201
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
-    """Login page (dummy credentials for the lab)."""
+    """Login page"""
     if request.method == "GET":
         return render_template("login.html")
 
-    username = request.form.get("username")
+    email = request.form.get("username")
     password = request.form.get("password")
 
-    if username == dummy_user["username"] and password == dummy_user["password"]:
-        session["logged_in"] = True
-        session["username"] = username
-        return redirect(url_for("home"))
+    if not email or not password:
+        return render_template("login.html", error="Email and password are required."), 400
 
-    return render_template("login.html", error="Invalid credentials. Try again.")
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={WEB_API_KEY}"
+    payload = {"email": email, "password": password, "returnSecureToken": True}
+
+    res = requests.post(url, json=payload)
+    if res.status_code == 200:
+        session["idToken"] = res.json()["idToken"]
+        return redirect(url_for("home")), 200
+    return render_template("login.html", error="Invalid credentials. Try again."), 401
+
+
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    data = request.json
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={WEB_API_KEY}"
+    payload = {"email": data["email"], "password": data["password"], "returnSecureToken": True}
+
+    res = requests.post(url, json=payload)
+    if res.status_code == 200:
+        return jsonify({"token": res.json()["idToken"]}), 200
+    return jsonify({"error": "Invalid credentials"}), 401
 
 
 @app.route("/logout")
