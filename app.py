@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+from functools import wraps
 from typing import Optional, Tuple, Union
 from flask import Flask, render_template, request, redirect, url_for, session, jsonify, Response
 from flask.typing import ResponseReturnValue
@@ -23,6 +23,41 @@ if not firebase_admin._apps:
     cred = credentials.Certificate(service_account_path)
     firebase_admin.initialize_app(cred)
 db = firestore.client()
+
+
+def require_api_key(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # 1. Grab the expected key from the environment
+        expected_key = os.environ.get("SENSOR_API_KEY")
+        if not expected_key:
+            return jsonify({"error": "Server not configured"}), 500
+
+        # 2. Grab the provided key from the request headers
+        # Get "X-API-Key" from request.headers
+        provided_key = request.headers.get("X_API_KEY") # Labeled X-API-KEY in Postman
+
+        # 3. Compare them
+        # If they don't match, return jsonify({"error": "Unauthorized"}), 401
+        if not provided_key or not expected_key == provided_key:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        # 4. If they match, allow the route to execute normally
+        return f(*args, **kwargs)
+    return decorated_function
+
+    header = request.headers.get("Authorization")
+    if not header or not header.startswith("Bearer "):
+        return jsonify({"error": "Invalid token format"}), 401
+    token = header.split(" ")[1]
+    if not token:
+        return None
+    try:
+        decoded = auth.verify_id_token(token)
+        return decoded["uid"]
+    except Exception as e:
+        return jsonify({"error": f"Unauthorized: {str(e)}"}), 401
+
 
 def get_current_user():
     """Return the currently logged-in username (or None).
@@ -341,5 +376,13 @@ def api_login():
     if res.status_code == 200:
         return jsonify({"token": res.json()["idToken"]}), 200
     return jsonify({"error": "Invalid credentials"}), 401
+
+
+@app.route("/api/sensor_data", methods=["POST"])
+@require_api_key
+def sensor_data():
+    return jsonify({"message": "sensor data accepted"}), 200
+
+
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
