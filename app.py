@@ -49,7 +49,7 @@ def get_user_or_401():
         return None
     try:
         decoded = auth.verify_id_token(token)
-        return decoded["uid"]
+        return decoded["uid"], 200
     except Exception as e:
         return jsonify({"error": f"Unauthorized: {str(e)}"}), 401
 
