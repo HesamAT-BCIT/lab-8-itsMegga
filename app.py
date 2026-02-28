@@ -9,6 +9,7 @@ from firebase_admin.firestore import DocumentReference
 from dotenv import load_dotenv
 import os
 import requests
+import re
 
 load_dotenv()
 
@@ -84,7 +85,7 @@ def get_user_or_401():
         return None
     try:
         decoded = auth.verify_id_token(token)
-        return decoded["uid"], 200
+        return decoded["uid"]
     except Exception as e:
         return jsonify({"error": f"Unauthorized: {str(e)}"}), 401
 
@@ -293,19 +294,51 @@ def api_update_profile():
     data = request.get_json(silent=True) or {}
     if not data:
         return jsonify({"error": "Request body cannot be empty"}), 400
+    
+    allowed_fields = {"first_name", "last_name", "student_id"}
+    errors = []
 
-    first_name = data.get("first_name")
-    last_name = data.get("last_name")
-    student_id = data.get("student_id")
+    # Reject unknown fields
+    unknown_fields = set(data.keys()) - allowed_fields
+    if unknown_fields:
+        errors.append(f"Unknown fields not allowed: {sorted(list(unknown_fields))}")
 
-    # Prepare the update data (only include provided fields)
     update_data = {}
-    if first_name is not None:
-        update_data["first_name"] = first_name.strip() if first_name else ""
-    if last_name is not None:
-        update_data["last_name"] = last_name.strip() if last_name else ""
-    if student_id is not None:
-        update_data["student_id"] = str(student_id).strip() if student_id else ""
+
+    # Validate data and formatting
+    if "first_name" in data:
+        first_name = data.get("first_name")
+        if not isinstance(first_name, str):
+            errors.append("first_name must be a string")
+        else:
+            first_name = first_name.strip()
+            if len(first_name) > 50:
+                errors.append("first_name must not exceed 50 characters")
+            else:
+                update_data["first_name"] = first_name
+
+    if "last_name" in data:
+        last_name = data.get("last_name")
+        if not isinstance(last_name, str):
+            errors.append("last_name must be a string")
+        else:
+            last_name = last_name.strip()
+            if len(last_name) > 50:
+                errors.append("last_name must not exceed 50 characters")
+            else:
+                update_data["last_name"] = last_name
+
+    if "student_id" in data:
+        student_id = data.get("student_id")
+        sid = str(student_id).strip() if student_id is not None else ""
+        if not re.fullmatch(r"[A-Za-z0-9]{8,9}", sid):
+            errors.append("student_id must be exactly 8 or 9 alphanumeric characters")
+        else:
+            update_data["student_id"] = sid
+
+    # Return all errors
+    if errors:
+        return jsonify({"errors": errors}), 400
 
     if not update_data:
         return jsonify({"error": "No updatable fields provided"}), 400
